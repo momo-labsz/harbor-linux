@@ -1,0 +1,96 @@
+name: "TEST ONLY - mpv in the Flatpak, with and without Lua"
+
+# Lives only on the branch test/flatpak-mpv-lua of the fork. It is NOT part of the pull request.
+# It builds the Flatpak recipe up to and including mpv, once as it is on the team's main branch
+# and once with the fix, and asks each mpv whether it has its on-screen controls.
+
+on:
+  push:
+    branches: [test/flatpak-mpv-lua]
+
+permissions:
+  contents: read
+
+jobs:
+  mpv:
+    name: "mpv from the ${{ matrix.recipe }} recipe"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - recipe: current
+            recipe_ref: 1eb53e8a25ec5322733c4cd83a2991217e8a0d3f
+            expect: "no"
+          - recipe: fixed
+            recipe_ref: c5479b25dfae11f1b093259f25e2d8295494d110
+            expect: "yes"
+    steps:
+      - name: Checkout the test files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: test
+
+      - name: Checkout the recipe under test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.recipe_ref }}
+          path: recipe
+
+      - name: Install Flatpak tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Install the runtimes the recipe names
+        run: |
+          set -euo pipefail
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+            org.freedesktop.Sdk.Extension.node22//25.08
+
+      - name: Show the mpv part of the recipe under test
+        working-directory: recipe
+        run: |
+          set -euo pipefail
+          grep -n -B4 -A14 -e "name: mpv" flatpak/site.harbor.Harbor.yml
+
+      - name: Build the recipe up to and including mpv
+        working-directory: recipe
+        run: |
+          set -euo pipefail
+          flatpak-builder --user --force-clean --stop-at=yt-dlp /tmp/mpv-build flatpak/site.harbor.Harbor.yml
+
+      - name: Ask that mpv about its on-screen controls
+        working-directory: recipe
+        env:
+          RECIPE: ${{ matrix.recipe }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -uo pipefail
+          flatpak-builder --run /tmp/mpv-build flatpak/site.harbor.Harbor.yml \
+            sh -c "$(cat ../test/.github/test/mpv-check.sh)" | tee /tmp/result.txt
+          osc_option="$(grep -m1 '^OSC_OPTION=' /tmp/result.txt | cut -d= -f2)"
+          osc_loaded="$(grep -m1 '^OSC_SCRIPT_LOADED=' /tmp/result.txt | cut -d= -f2)"
+          play_exit="$(grep -m1 '^PLAY_EXIT=' /tmp/result.txt | cut -d= -f2)"
+          no_osc_exit="$(grep -m1 '^NO_OSC_EXIT=' /tmp/result.txt | cut -d= -f2)"
+          {
+            echo "### mpv from the ${RECIPE} recipe"
+            echo ""
+            echo "| question | answer |"
+            echo "|---|---|"
+            echo "| knows the option \`--osc\` | ${osc_option} |"
+            echo "| loads its on-screen controls (\`osc.lua\`) | ${osc_loaded} |"
+            echo "| exit code of a normal start | ${play_exit} |"
+            echo "| exit code when started with \`--no-osc\` | ${no_osc_exit} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${osc_option}" != "${EXPECT}" ] || [ "${osc_loaded}" != "${EXPECT}" ]; then
+            echo "::error::expected on-screen controls: ${EXPECT}; got option=${osc_option} script=${osc_loaded}"
+            exit 1
+          fi
+          echo "As expected for the ${RECIPE} recipe: on-screen controls = ${EXPECT}"

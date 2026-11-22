@@ -106,7 +106,7 @@ jobs:
       - name: Checkout downstream Flatpak configuration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: test/flatpak-mpv-lua # TEST ONLY: the team's file says "main"
           path: packaging
 
       - name: Checkout Harbor
@@ -211,6 +211,53 @@ jobs:
           flatpak build-bundle /tmp/harbor-flatpak-repo \
             "../Harbor_${VERSION}_x86_64.flatpak" \
             site.harbor.Harbor "${CHANNEL}"
+
+      # ---- TEST ONLY (branch test/flatpak-mpv-lua of the fork, not in the pull request) ----
+      - name: "TEST ONLY: ask the mpv in the finished build about its on-screen controls"
+        working-directory: harbor
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          flatpak-builder --run /tmp/harbor-flatpak-build flatpak/site.harbor.Harbor.yml \
+            sh -c "$(cat ../packaging/.github/test/mpv-check.sh)" | tee /tmp/mpv-build-dir.txt
+          osc_option="$(grep -m1 '^OSC_OPTION=' /tmp/mpv-build-dir.txt | cut -d= -f2)"
+          osc_loaded="$(grep -m1 '^OSC_SCRIPT_LOADED=' /tmp/mpv-build-dir.txt | cut -d= -f2)"
+          no_osc_exit="$(grep -m1 '^NO_OSC_EXIT=' /tmp/mpv-build-dir.txt | cut -d= -f2)"
+          {
+            echo "### mpv in the finished build directory"
+            echo ""
+            echo "| question | answer |"
+            echo "|---|---|"
+            echo "| knows the option \`--osc\` | ${osc_option} |"
+            echo "| loads its on-screen controls (\`osc.lua\`) | ${osc_loaded} |"
+            echo "| exit code when started with \`--no-osc\` | ${no_osc_exit} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          [ "${osc_option}" = yes ] && [ "${osc_loaded}" = yes ]
+
+      - name: "TEST ONLY: install the bundle and ask its mpv the same, through flatpak run"
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -uo pipefail
+          flatpak install --user -y --bundle "Harbor_${VERSION}_x86_64.flatpak"
+          flatpak info --user site.harbor.Harbor | head -n 12
+          dbus-run-session -- flatpak run --command=sh site.harbor.Harbor \
+            -c "$(cat packaging/.github/test/mpv-check.sh)" | tee /tmp/mpv-installed.txt
+          osc_option="$(grep -m1 '^OSC_OPTION=' /tmp/mpv-installed.txt | cut -d= -f2)"
+          osc_loaded="$(grep -m1 '^OSC_SCRIPT_LOADED=' /tmp/mpv-installed.txt | cut -d= -f2)"
+          no_osc_exit="$(grep -m1 '^NO_OSC_EXIT=' /tmp/mpv-installed.txt | cut -d= -f2)"
+          {
+            echo "### mpv in the installed bundle (flatpak run, the app's real sandbox)"
+            echo ""
+            echo "| question | answer |"
+            echo "|---|---|"
+            echo "| knows the option \`--osc\` | ${osc_option} |"
+            echo "| loads its on-screen controls (\`osc.lua\`) | ${osc_loaded} |"
+            echo "| exit code when started with \`--no-osc\` | ${no_osc_exit} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          [ "${osc_option}" = yes ] && [ "${osc_loaded}" = yes ]
+      # ---- end of TEST ONLY ----
 
       - name: Validate Flatpak bundle
         env:
