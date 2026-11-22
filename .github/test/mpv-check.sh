@@ -36,7 +36,17 @@ else
   echo "OSC_SCRIPT_LOADED=no"
 fi
 
-echo "### start it with --no-osc, the way Harbor's Multiview starts this mpv"
+echo "### start it with --no-osc (Harbor's Multiview passes that; Multiview is Windows-only today)"
 mpv --no-osc --no-config --vo=null --ao=null $RAW "$work/clip.raw" > "$work/noosc.log" 2>&1
 echo "NO_OSC_EXIT=$?"
 tail -n 4 "$work/noosc.log" | sed 's/^/  /'
+
+echo "### start it with switches of Harbor's seek-preview helper (src-tauri/src/thumbs.rs, runs on Linux too)"
+mpv --no-config --no-audio --no-sub --vo=null --load-scripts=no --ytdl=no $RAW "$work/clip.raw" > "$work/thumbs.log" 2>&1
+echo "THUMBS_EXIT=$?"
+tail -n 4 "$work/thumbs.log" | sed 's/^/  /'
+
+echo "### the same without --ytdl=no, to see which of the two switches decides"
+mpv --no-config --no-audio --no-sub --vo=null --load-scripts=no $RAW "$work/clip.raw" > "$work/thumbs2.log" 2>&1
+echo "THUMBS_WITHOUT_YTDL_EXIT=$?"
+tail -n 2 "$work/thumbs2.log" | sed 's/^/  /'

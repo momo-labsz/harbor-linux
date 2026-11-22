@@ -79,6 +79,8 @@ jobs:
           osc_loaded="$(grep -m1 '^OSC_SCRIPT_LOADED=' /tmp/result.txt | cut -d= -f2)"
           play_exit="$(grep -m1 '^PLAY_EXIT=' /tmp/result.txt | cut -d= -f2)"
           no_osc_exit="$(grep -m1 '^NO_OSC_EXIT=' /tmp/result.txt | cut -d= -f2)"
+          thumbs_exit="$(grep -m1 '^THUMBS_EXIT=' /tmp/result.txt | cut -d= -f2)"
+          thumbs2_exit="$(grep -m1 '^THUMBS_WITHOUT_YTDL_EXIT=' /tmp/result.txt | cut -d= -f2)"
           {
             echo "### mpv from the ${RECIPE} recipe"
             echo ""
@@ -88,6 +90,8 @@ jobs:
             echo "| loads its on-screen controls (\`osc.lua\`) | ${osc_loaded} |"
             echo "| exit code of a normal start | ${play_exit} |"
             echo "| exit code when started with \`--no-osc\` | ${no_osc_exit} |"
+            echo "| exit code with the seek-preview helper's switches (\`--ytdl=no\`) | ${thumbs_exit} |"
+            echo "| exit code with the same switches but without \`--ytdl=no\` | ${thumbs2_exit} |"
           } >> "${GITHUB_STEP_SUMMARY}"
           if [ "${osc_option}" != "${EXPECT}" ] || [ "${osc_loaded}" != "${EXPECT}" ]; then
             echo "::error::expected on-screen controls: ${EXPECT}; got option=${osc_option} script=${osc_loaded}"
