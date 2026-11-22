@@ -1,0 +1,188 @@
+name: "TEST ONLY - full Flatpak build with the fix"
+
+# Lives only on the branch test/flatpak-full-build of the fork. It is NOT part of the pull request.
+# It repeats the build steps of build-flatpak.yml (same commands, same order) with the recipe of
+# this branch, publishes nothing, and then asks the packaged mpv about its on-screen controls.
+# The team's own workflows are left untouched and stay switched off in the fork.
+
+on:
+  push:
+    branches: [test/flatpak-full-build]
+
+permissions:
+  contents: read
+
+env:
+  # The Harbor commit the team's Linux release beta-v1.0.4 was built from (flatpak/source-ref.txt).
+  SOURCE_REF: c4f0242a65e9a0b57da4f877e0df8b8f360aab06
+  CHANNEL: beta
+
+jobs:
+  build:
+    name: Build the Flatpak bundle with the fix and ask its mpv
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    steps:
+      - name: Checkout downstream Flatpak configuration (this branch)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: packaging
+
+      - name: Checkout Harbor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: HarborCommunity/Harbor
+          ref: ${{ env.SOURCE_REF }}
+          path: harbor
+
+      - name: Overlay downstream Flatpak configuration
+        run: |
+          set -euo pipefail
+          rsync -a --delete packaging/flatpak/ harbor/flatpak/
+          install -Dm644 packaging/flatpak/tauri.flatpak.conf.json harbor/src-tauri/tauri.flatpak.conf.json
+
+      - name: Resolve package version
+        id: package
+        working-directory: harbor
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Flatpak tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder appstream desktop-file-utils ostree python3-venv
+
+      - name: Configure Flathub runtimes
+        run: |
+          set -euo pipefail
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08 \
+            org.freedesktop.Sdk.Extension.node22//25.08
+
+      - name: Refresh downstream Flatpak sources
+        working-directory: harbor
+        run: |
+          set -euo pipefail
+          release_date="$(git show -s --format=%cs "${SOURCE_REF}")"
+          RELEASE_DATE="${release_date}" bash flatpak/update-flatpak.sh
+          printf '%s\n' "${SOURCE_REF}" > flatpak/source-ref.txt
+
+      - name: Validate Flatpak metadata
+        working-directory: harbor
+        run: |
+          set -euo pipefail
+          bash flatpak/update-flatpak.sh --check
+          desktop-file-validate flatpak/site.harbor.Harbor.desktop
+          appstreamcli validate --no-net flatpak/site.harbor.Harbor.metainfo.xml
+          flatpak-builder --show-manifest flatpak/site.harbor.Harbor.yml >/dev/null
+
+      - name: Prepare Flatpak source
+        working-directory: harbor
+        run: |
+          set -euo pipefail
+
+          node <<'EOF'
+          const fs = require('fs');
+          const workspacePath = 'pnpm-workspace.yaml';
+          let workspace = fs.readFileSync(workspacePath, 'utf8');
+          const setAllowBuild = (name, value) => {
+            const entry = new RegExp(`^(\\s*)${name}:.*$`, 'm');
+            if (entry.test(workspace)) {
+              workspace = workspace.replace(entry, `$1${name}: ${value}`);
+              return;
+            }
+            workspace = workspace.replace(/^allowBuilds:\s*$/m, `allowBuilds:\n  ${name}: ${value}`);
+          };
+          setAllowBuild('esbuild', 'true');
+          setAllowBuild('protobufjs', 'false');
+          fs.writeFileSync(workspacePath, workspace);
+          EOF
+
+      - name: Build Flatpak bundle
+        working-directory: harbor
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          flatpak-builder --user --force-clean --default-branch="${CHANNEL}" --repo=/tmp/harbor-flatpak-repo /tmp/harbor-flatpak-build flatpak/site.harbor.Harbor.yml
+          flatpak build-bundle /tmp/harbor-flatpak-repo \
+            "../Harbor_${VERSION}_x86_64.flatpak" \
+            site.harbor.Harbor "${CHANNEL}"
+
+      - name: Validate Flatpak bundle
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          ostree init --repo=/tmp/harbor-flatpak-validation-repo --mode=archive-z2
+          flatpak build-import-bundle --update-appstream --no-update-summary \
+            /tmp/harbor-flatpak-validation-repo \
+            "Harbor_${VERSION}_x86_64.flatpak"
+          ls -l "Harbor_${VERSION}_x86_64.flatpak"
+
+      - name: Upload Flatpak bundle artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-bundle-with-lua-${{ steps.package.outputs.version }}
+          path: Harbor_${{ steps.package.outputs.version }}_x86_64.flatpak
+          if-no-files-found: error
+
+      - name: Ask the mpv in the finished build directory about its on-screen controls
+        id: ask_build_dir
+        working-directory: harbor
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          flatpak-builder --run /tmp/harbor-flatpak-build flatpak/site.harbor.Harbor.yml \
+            sh -c "$(cat ../packaging/.github/test/mpv-check.sh)" | tee /tmp/mpv-build-dir.txt
+          osc_option="$(grep -m1 '^OSC_OPTION=' /tmp/mpv-build-dir.txt | cut -d= -f2)"
+          osc_loaded="$(grep -m1 '^OSC_SCRIPT_LOADED=' /tmp/mpv-build-dir.txt | cut -d= -f2)"
+          no_osc_exit="$(grep -m1 '^NO_OSC_EXIT=' /tmp/mpv-build-dir.txt | cut -d= -f2)"
+          {
+            echo "### mpv in the finished build directory"
+            echo ""
+            echo "| question | answer |"
+            echo "|---|---|"
+            echo "| knows the option \`--osc\` | ${osc_option} |"
+            echo "| loads its on-screen controls (\`osc.lua\`) | ${osc_loaded} |"
+            echo "| exit code when started with \`--no-osc\` | ${no_osc_exit} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          [ "${osc_option}" = yes ] && [ "${osc_loaded}" = yes ]
+
+      - name: Install the bundle and ask its mpv the same, through flatpak run
+        id: ask_installed
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -uo pipefail
+          flatpak install --user -y --bundle "Harbor_${VERSION}_x86_64.flatpak"
+          flatpak info --user site.harbor.Harbor | head -n 12
+          dbus-run-session -- flatpak run --command=sh site.harbor.Harbor \
+            -c "$(cat packaging/.github/test/mpv-check.sh)" | tee /tmp/mpv-installed.txt
+          osc_option="$(grep -m1 '^OSC_OPTION=' /tmp/mpv-installed.txt | cut -d= -f2)"
+          osc_loaded="$(grep -m1 '^OSC_SCRIPT_LOADED=' /tmp/mpv-installed.txt | cut -d= -f2)"
+          no_osc_exit="$(grep -m1 '^NO_OSC_EXIT=' /tmp/mpv-installed.txt | cut -d= -f2)"
+          {
+            echo "### mpv in the installed bundle (flatpak run, the app's real sandbox)"
+            echo ""
+            echo "| question | answer |"
+            echo "|---|---|"
+            echo "| knows the option \`--osc\` | ${osc_option} |"
+            echo "| loads its on-screen controls (\`osc.lua\`) | ${osc_loaded} |"
+            echo "| exit code when started with \`--no-osc\` | ${no_osc_exit} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          [ "${osc_option}" = yes ] && [ "${osc_loaded}" = yes ]
+
+      - name: At least one of the two questions must have been answered with yes
+        if: steps.ask_build_dir.outcome != 'success' && steps.ask_installed.outcome != 'success'
+        run: |
+          echo "::error::neither the build directory nor the installed bundle showed an mpv with on-screen controls"
+          exit 1
